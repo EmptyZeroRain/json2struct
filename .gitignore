@@ -1,0 +1,18 @@
+# IDEs
+.idea/
+.vscode/
+
+# Go build/test output
+bin/
+*.test
+coverage.out
+coverage.html
+
+# OS files
+.DS_Store
+
+# Local generated files
+*.generated.go
+
+# Local project requirement document
+/需求.md
