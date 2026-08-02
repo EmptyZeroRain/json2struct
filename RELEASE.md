@@ -31,7 +31,7 @@ git status --short
    git push origin v0.1.2
    ```
 
-5. 在 GitHub 创建同名 Release，粘贴对应版本的 Changelog 内容。
+5. GitHub Actions 会根据 `vX.Y.Z` tag 自动创建 Release，并生成变更说明。
 6. 验证模块索引：
 
    ```bash
