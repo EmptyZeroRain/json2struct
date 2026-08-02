@@ -16,9 +16,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Normalize checkout
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git checkout -- .
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
           check-latest: true
       - name: Check formatting
         shell: bash
