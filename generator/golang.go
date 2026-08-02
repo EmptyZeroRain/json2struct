@@ -99,7 +99,7 @@ func goType(f *schema.Field, nested string, o option.Options) ast.Expr {
 	if f.Array || f.Type == schema.TypeArray {
 		return &ast.ArrayType{Elt: e}
 	}
-	if f.Nullable && f.Type != schema.TypeString && f.Type != schema.TypeAny {
+	if f.Nullable && f.Type != schema.TypeAny {
 		return &ast.StarExpr{X: e}
 	}
 	return e

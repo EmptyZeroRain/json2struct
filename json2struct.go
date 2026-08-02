@@ -44,6 +44,26 @@ func (g *Generator) AddBatch(data [][]byte, workers int) error {
 	g.version++
 	return nil
 }
+
+// AddBatchWithOptions is the configurable batch ingestion API.
+func (g *Generator) AddBatchWithOptions(data [][]byte, opts BatchOptions) error {
+	s, err := InferBatch(data, opts)
+	if err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.schemas = append(g.schemas, s)
+	if g.options.Merge {
+		if g.merged == nil {
+			g.merged = s.Clone()
+		} else {
+			schema.MergeInto(g.merged, s)
+		}
+	}
+	g.version++
+	return nil
+}
 func (g *Generator) AddReader(r io.Reader) error {
 	s, err := (parser.JSONParser{}).Parse(r)
 	if err != nil {

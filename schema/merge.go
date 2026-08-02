@@ -1,56 +1,18 @@
 package schema
 
-// Merge combines two observations. Missing properties become optional.
+// Merge combines two observations without mutating either input.
 func Merge(a, b *Field) *Field {
 	if a == nil {
-		return b.clone()
+		return b.Clone()
 	}
 	if b == nil {
-		return a.clone()
+		return a.Clone()
 	}
-	r := a.clone()
-	r.Required = a.Required && b.Required
-	r.Nullable = a.Nullable || b.Nullable || a.Type == TypeNull || b.Type == TypeNull
-	r.Type = mergeType(a.Type, b.Type)
-	if r.Type == TypeObject || a.Type == TypeObject || b.Type == TypeObject {
-		r.Type = TypeObject
-		if r.Children == nil {
-			r.Children = map[string]*Field{}
-		}
-		for name, child := range r.Children {
-			if _, exists := b.Children[name]; !exists {
-				child.Required = false
-			}
-		}
-		for name, child := range b.Children {
-			if old, ok := r.Children[name]; ok {
-				r.Children[name] = Merge(old, child)
-			} else {
-				c := child.clone()
-				c.Required = false
-				r.Children[name] = c
-			}
-		}
-	}
-	if a.Array || b.Array || a.Type == TypeArray || b.Type == TypeArray {
-		r.Array, r.Type = true, TypeArray
-		if a.Element != nil && b.Element != nil {
-			r.Element = Merge(a.Element, b.Element)
-		} else if r.Element == nil {
-			if a.Element != nil {
-				r.Element = a.Element.clone()
-			}
-			if b.Element != nil {
-				r.Element = b.Element.clone()
-			}
-		}
-	}
-	return r
+	r := a.Clone()
+	return MergeInto(r, b)
 }
 
 // MergeInto merges b into a in place. The caller must exclusively own a.
-// It avoids cloning the accumulated tree and is intended for high-volume
-// ingestion such as large NDJSON streams.
 func MergeInto(a, b *Field) *Field {
 	if a == nil {
 		return b.Clone()
@@ -60,14 +22,37 @@ func MergeInto(a, b *Field) *Field {
 	}
 	a.Required = a.Required && b.Required
 	a.Nullable = a.Nullable || b.Nullable || a.Type == TypeNull || b.Type == TypeNull
-	a.Type = mergeType(a.Type, b.Type)
-	if a.Type == TypeObject || b.Type == TypeObject {
-		a.Type = TypeObject
+	if a.Type == TypeNull {
+		a.Type = b.Type
+	}
+	if b.Type == TypeNull {
+		return a
+	}
+
+	// A conflict is terminal: do not reinterpret scalar+object or scalar+array
+	// as a container, otherwise the generated model silently loses the conflict.
+	if a.Type == TypeAny || b.Type == TypeAny {
+		a.Type = TypeAny
+		a.Array = false
+		return a
+	}
+	if a.Type != b.Type {
+		if (a.Type == TypeInteger && b.Type == TypeNumber) || (a.Type == TypeNumber && b.Type == TypeInteger) {
+			a.Type = TypeNumber
+		} else {
+			a.Type = TypeAny
+			a.Array = false
+		}
+		return a
+	}
+
+	switch a.Type {
+	case TypeObject:
 		if a.Children == nil {
 			a.Children = make(map[string]*Field)
 		}
 		for name, child := range a.Children {
-			if _, exists := b.Children[name]; !exists {
+			if _, ok := b.Children[name]; !ok {
 				child.Required = false
 			}
 		}
@@ -80,9 +65,8 @@ func MergeInto(a, b *Field) *Field {
 				a.Children[name] = c
 			}
 		}
-	}
-	if a.Array || b.Array || a.Type == TypeArray || b.Type == TypeArray {
-		a.Array, a.Type = true, TypeArray
+	case TypeArray:
+		a.Array = true
 		if a.Element == nil && b.Element != nil {
 			a.Element = b.Element.Clone()
 		} else if a.Element != nil && b.Element != nil {
@@ -90,20 +74,4 @@ func MergeInto(a, b *Field) *Field {
 		}
 	}
 	return a
-}
-
-func mergeType(a, b FieldType) FieldType {
-	if a == b {
-		return a
-	}
-	if a == TypeNull {
-		return b
-	}
-	if b == TypeNull {
-		return a
-	}
-	if (a == TypeInteger && b == TypeNumber) || (a == TypeNumber && b == TypeInteger) {
-		return TypeNumber
-	}
-	return TypeAny
 }

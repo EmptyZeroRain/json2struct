@@ -3,7 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/EmptyZeroRain/json2struct.svg)](https://pkg.go.dev/github.com/EmptyZeroRain/json2struct)
 [![CI](https://github.com/EmptyZeroRain/json2struct/actions/workflows/ci.yml/badge.svg)](https://github.com/EmptyZeroRain/json2struct/actions/workflows/ci.yml)
 
-一个仅依赖 Go 标准库的 JSON/NDJSON 到 Go struct 推断库。
+一个仅依赖 Go 标准库、兼容 Go 1.22+ 的 JSON/NDJSON 到 Go struct 推断库。
 
 仅使用 Go 标准库，将 JSON/NDJSON 样本推断为可编译的 Go struct。
 

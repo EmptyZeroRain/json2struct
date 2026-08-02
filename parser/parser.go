@@ -5,10 +5,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+
 	"github.com/EmptyZeroRain/json2struct/inference"
 	"github.com/EmptyZeroRain/json2struct/option"
 	"github.com/EmptyZeroRain/json2struct/schema"
-	"io"
 )
 
 type Parser interface {
@@ -75,6 +76,11 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 	return inference.Infer(value), nil
 }
 
+// ParseBytes is an allocation-conscious convenience API for a single sample.
+func ParseBytes(data []byte) (*schema.Field, error) {
+	return (JSONParser{}).Parse(bytes.NewReader(data))
+}
+
 func validateValue(v interface{}, l option.Limits, depth int, path string, count *int) error {
 	if l.MaxDepth > 0 && depth > l.MaxDepth {
 		return fmt.Errorf("parser: maximum depth %d exceeded at %s", l.MaxDepth, path)
@@ -82,7 +88,7 @@ func validateValue(v interface{}, l option.Limits, depth int, path string, count
 	switch x := v.(type) {
 	case map[string]interface{}:
 		for k, child := range x {
-			*count++
+			*count = *count + 1
 			if l.MaxFields > 0 && *count > l.MaxFields {
 				return fmt.Errorf("parser: maximum fields %d exceeded at %s", l.MaxFields, path)
 			}
@@ -135,21 +141,34 @@ func ParseNDJSON(r io.Reader) (*schema.Field, error) {
 }
 
 func ParseNDJSONWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
+	if r == nil {
+		return nil, fmt.Errorf("reader is nil")
+	}
 	s := bufio.NewScanner(r)
 	max := opts.Limits.MaxLineBytes
 	if max <= 0 {
 		max = 16 * 1024 * 1024
 	}
-	s.Buffer(make([]byte, 64*1024), max)
+	// Scanner's maximum token size includes a small implementation margin;
+	// enforce the public limit explicitly after scanning as well.
+	s.Buffer(make([]byte, 64*1024), max+1)
 	var result *schema.Field
 	line := 0
 	for s.Scan() {
 		line++
 		lineBytes := bytes.TrimSpace(s.Bytes())
+		if opts.Limits.MaxLineBytes > 0 && len(s.Bytes()) > opts.Limits.MaxLineBytes {
+			return nil, fmt.Errorf("ndjson line %d: maximum line size %d exceeded", line, opts.Limits.MaxLineBytes)
+		}
 		if len(lineBytes) == 0 {
 			continue
 		}
-		f, err := ParseWithOptions(bytes.NewReader(lineBytes), opts)
+		if opts.Limits.MaxBytes > 0 && int64(len(lineBytes)) > opts.Limits.MaxBytes {
+			return nil, fmt.Errorf("ndjson line %d: maximum input size %d exceeded", line, opts.Limits.MaxBytes)
+		}
+		lineOpts := opts
+		lineOpts.Limits.MaxBytes = 0
+		f, err := ParseWithOptions(bytes.NewReader(lineBytes), lineOpts)
 		if err != nil {
 			return nil, fmt.Errorf("ndjson line %d: %w", line, err)
 		}

@@ -20,7 +20,15 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-      - run: gofmt -d .
+      - name: Check formatting
+        shell: bash
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "The following files are not formatted:"
+            printf '%s\n' "$files"
+            exit 1
+          fi
       - run: go vet ./...
       - run: go test ./...
       - run: go test -race ./...

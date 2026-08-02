@@ -123,3 +123,13 @@ func TestInferBatch(t *testing.T) {
 		t.Error("id should be optional")
 	}
 }
+
+func TestAddBatchWithOptions(t *testing.T) {
+	g := json2struct.New(json2struct.Options{Name: "Batch", Merge: true})
+	if err := g.AddBatchWithOptions([][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)}, json2struct.BatchOptions{Workers: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if g.Schema().Children["a"].Required {
+		t.Error("a should be optional")
+	}
+}
