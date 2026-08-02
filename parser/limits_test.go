@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/EmptyZeroRain/json2struct/option"
+	"github.com/EmptyZeroRain/json2struct/schema"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,17 @@ func TestLimitStringAndNumber(t *testing.T) {
 	_, err = ParseWithOptions(strings.NewReader(`{"value":12345}`), Options{Limits: option.Limits{MaxNumberBytes: 3}})
 	if !errors.Is(err, ErrMaxNumberBytes) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestDuplicateKeyPolicy(t *testing.T) {
+	input := strings.NewReader(`{"a":1,"a":"x"}`)
+	if _, err := ParseWithOptions(input, Options{DuplicateKeys: DuplicateKeyError}); err == nil {
+		t.Fatal("expected duplicate key error")
+	}
+	f, err := ParseWithOptions(strings.NewReader(`{"a":1,"a":"x"}`), Options{DuplicateKeys: DuplicateKeyFirst})
+	if err != nil || f.Children["a"].Type != schema.TypeString {
+		t.Fatalf("first policy: field=%v err=%v", f.Children["a"], err)
 	}
 }
 

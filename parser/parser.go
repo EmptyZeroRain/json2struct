@@ -7,10 +7,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/EmptyZeroRain/json2struct/option"
 	"github.com/EmptyZeroRain/json2struct/schema"
 )
+
+type Stats struct {
+	Bytes    int64
+	Nodes    int64
+	Fields   int64
+	Duration time.Duration
+}
 
 type Parser interface {
 	Parse(io.Reader) (*schema.Field, error)
@@ -35,7 +43,7 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 	dec := json.NewDecoder(source)
 	dec.UseNumber()
 	state := &parseState{}
-	f, err := inferDecoder(dec, "", opts.Limits, 0, state)
+	f, err := inferDecoder(dec, "", opts.Limits, opts.DuplicateKeys, 0, state)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +59,45 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 	return f, nil
 }
 
+// ParseWithStats parses and returns resource usage for the sample.
+func ParseWithStats(r io.Reader, opts Options) (*schema.Field, Stats, error) {
+	start := time.Now()
+	counted := &countingReader{reader: r}
+	f, err := ParseWithOptions(counted, opts)
+	s := Stats{Duration: time.Since(start)}
+	s.Bytes = counted.n
+	if f != nil {
+		s.Nodes = int64(schema.CountNodes(f))
+		s.Fields = int64(countFields(f))
+	}
+	return f, s, err
+}
+func countFields(root *schema.Field) int {
+	if root == nil {
+		return 0
+	}
+	n := 0
+	stack := []*schema.Field{root}
+	seen := map[*schema.Field]bool{}
+	for len(stack) > 0 {
+		i := len(stack) - 1
+		f := stack[i]
+		stack = stack[:i]
+		if f == nil || seen[f] {
+			continue
+		}
+		seen[f] = true
+		n += len(f.Children)
+		for _, c := range f.Children {
+			stack = append(stack, c)
+		}
+		if f.Element != nil {
+			stack = append(stack, f.Element)
+		}
+	}
+	return n
+}
+
 // ParseWithContext is ParseWithOptions with cancellation support.
 func ParseWithContext(ctx context.Context, r io.Reader, opts Options) (*schema.Field, error) {
 	if ctx == nil {
@@ -60,6 +107,36 @@ func ParseWithContext(ctx context.Context, r io.Reader, opts Options) (*schema.F
 		return nil, err
 	}
 	return ParseWithOptions(&contextReader{ctx: ctx, r: r}, opts)
+}
+
+// ParseWithReadCloser is the cancellation-safe variant for network and file
+// readers. When ctx is cancelled, the reader is closed to interrupt a blocked
+// Read call. Ownership remains with the caller; the reader is only closed on
+// cancellation, not after a successful parse.
+func ParseWithReadCloser(ctx context.Context, r io.ReadCloser, opts Options) (*schema.Field, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is nil")
+	}
+	if r == nil {
+		return nil, fmt.Errorf("reader is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = r.Close()
+		case <-done:
+		}
+	}()
+	f, err := ParseWithOptions(&contextReader{ctx: ctx, r: r}, opts)
+	close(done)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	return f, err
 }
 
 type contextReader struct {
@@ -76,13 +153,13 @@ func (r *contextReader) Read(p []byte) (int, error) {
 
 type parseState struct{ nodes, fields int }
 
-func inferDecoder(dec *json.Decoder, name string, l option.Limits, depth int, state *parseState) (*schema.Field, error) {
+func inferDecoder(dec *json.Decoder, name string, l option.Limits, duplicate DuplicateKeyPolicy, depth int, state *parseState) (*schema.Field, error) {
 	state.nodes++
 	if l.MaxNodes > 0 && state.nodes > l.MaxNodes {
-		return nil, fmt.Errorf("%w: %d", ErrMaxNodes, l.MaxNodes)
+		return nil, &LimitError{Kind: LimitNodes, Limit: int64(l.MaxNodes)}
 	}
 	if l.MaxDepth > 0 && depth > l.MaxDepth {
-		return nil, fmt.Errorf("%w: %d", ErrMaxDepth, l.MaxDepth)
+		return nil, &LimitError{Kind: LimitDepth, Limit: int64(l.MaxDepth)}
 	}
 	t, err := dec.Token()
 	if err != nil {
@@ -94,14 +171,14 @@ func inferDecoder(dec *json.Decoder, name string, l option.Limits, depth int, st
 		f.Type, f.Nullable = schema.TypeNull, true
 	case string:
 		if l.MaxStringBytes > 0 && len(v) > l.MaxStringBytes {
-			return nil, fmt.Errorf("%w: %d", ErrMaxStringBytes, l.MaxStringBytes)
+			return nil, &LimitError{Kind: LimitStringBytes, Limit: int64(l.MaxStringBytes), Path: name}
 		}
 		f.Type = schema.TypeString
 	case bool:
 		f.Type = schema.TypeBoolean
 	case json.Number:
 		if l.MaxNumberBytes > 0 && len(v) > l.MaxNumberBytes {
-			return nil, fmt.Errorf("%w: %d", ErrMaxNumberBytes, l.MaxNumberBytes)
+			return nil, &LimitError{Kind: LimitNumberBytes, Limit: int64(l.MaxNumberBytes), Path: name}
 		}
 		f.Type = schema.TypeString
 	case json.Delim:
@@ -109,6 +186,7 @@ func inferDecoder(dec *json.Decoder, name string, l option.Limits, depth int, st
 		case '{':
 			f.Type = schema.TypeObject
 			f.Children = map[string]*schema.Field{}
+			seen := make(map[string]struct{})
 			for dec.More() {
 				keyToken, e := dec.Token()
 				key, ok := keyToken.(string)
@@ -118,11 +196,21 @@ func inferDecoder(dec *json.Decoder, name string, l option.Limits, depth int, st
 				if !ok {
 					return nil, fmt.Errorf("invalid object key")
 				}
+				if _, exists := seen[key]; exists && duplicate == DuplicateKeyError {
+					return nil, fmt.Errorf("parser: duplicate JSON key %q", key)
+				}
+				if _, exists := seen[key]; exists && duplicate == DuplicateKeyFirst {
+					if _, e := skipValue(dec); e != nil {
+						return nil, e
+					}
+					continue
+				}
+				seen[key] = struct{}{}
 				state.fields++
 				if l.MaxFields > 0 && state.fields > l.MaxFields {
 					return nil, fmt.Errorf("%w: %d", ErrMaxFields, l.MaxFields)
 				}
-				child, e := inferDecoder(dec, key, l, depth+1, state)
+				child, e := inferDecoder(dec, key, l, duplicate, depth+1, state)
 				if e != nil {
 					return nil, e
 				}
@@ -146,7 +234,7 @@ func inferDecoder(dec *json.Decoder, name string, l option.Limits, depth int, st
 					}
 					continue
 				}
-				child, e := inferDecoder(dec, "", l, depth+1, state)
+				child, e := inferDecoder(dec, "", l, duplicate, depth+1, state)
 				if e != nil {
 					return nil, e
 				}
@@ -170,27 +258,24 @@ func inferDecoder(dec *json.Decoder, name string, l option.Limits, depth int, st
 }
 
 func skipValue(dec *json.Decoder) (int, error) {
-	t, e := dec.Token()
-	if e != nil {
-		return 0, e
-	}
-	if d, ok := t.(json.Delim); ok && (d == '{' || d == '[') {
-		close := json.Delim('}')
-		if d == '[' {
-			close = ']'
+	depth := 0
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			return 0, err
 		}
-		for dec.More() {
-			if _, e = skipValue(dec); e != nil {
-				return 0, e
+		if d, ok := t.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
 			}
 		}
-		_, e = dec.Token()
-		if e != nil {
-			return 0, e
+		if depth <= 0 {
+			return 0, nil
 		}
-		_ = close
 	}
-	return 0, nil
 }
 
 type countingReader struct {

@@ -22,17 +22,32 @@ func MergeAll(items []*Field) *Field {
 	return current[0]
 }
 
+// MergeAllInto merges all items into dst without cloning the accumulator.
+func MergeAllInto(dst *Field, items []*Field) *Field {
+	for _, item := range items {
+		if item != nil {
+			MergeInto(dst, item)
+		}
+	}
+	return dst
+}
+
 // CountNodes returns the number of nodes in a schema tree.
 func CountNodes(root *Field) int {
 	if root == nil {
 		return 0
 	}
 	n := 0
+	seen := make(map[*Field]bool)
 	stack := []*Field{root}
 	for len(stack) > 0 {
 		i := len(stack) - 1
 		f := stack[i]
 		stack = stack[:i]
+		if seen[f] {
+			continue
+		}
+		seen[f] = true
 		n++
 		for _, c := range f.Children {
 			stack = append(stack, c)

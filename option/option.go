@@ -9,6 +9,7 @@ type Options struct {
 	NestedMode       string // inline or separate
 	ConflictStrategy string // strict or loose
 	NumberType       string // auto, int, float
+	Limits           Limits
 }
 
 const (

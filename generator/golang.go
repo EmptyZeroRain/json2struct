@@ -16,28 +16,54 @@ import (
 )
 
 func Generate(s *schema.Field, opts option.Options) ([]byte, error) {
+	return GenerateWithCache(s, opts, nil)
+}
+func GenerateWithCache(s *schema.Field, opts option.Options, cache *NameCache) ([]byte, error) {
 	if s == nil {
 		return nil, fmt.Errorf("schema is nil")
 	}
 	opts.Defaults()
+	if err := schema.Validate(s, 0, 0); err != nil {
+		return nil, err
+	}
+	for _, child := range s.Children {
+		if child != nil && child.Tags != nil {
+			for _, tag := range child.Tags {
+				if err := validateTag(tag); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	if !isIdentifier(opts.Package) || !isIdentifier(opts.Name) {
 		return nil, fmt.Errorf("invalid package or struct name")
 	}
 	file := &ast.File{Name: ast.NewIdent(opts.Package)}
-	file.Decls = []ast.Decl{&ast.GenDecl{Tok: token.TYPE, Specs: []ast.Spec{structSpec(opts.Name, s, opts)}}}
+	if cache == nil {
+		cache = NewNameCache()
+	}
+	file.Decls = []ast.Decl{&ast.GenDecl{Tok: token.TYPE, Specs: []ast.Spec{structSpec(opts.Name, s, opts, cache)}}}
 	var out bytes.Buffer
 	if err := format.Node(&out, token.NewFileSet(), file); err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil
 }
+func validateTag(tag string) error {
+	for _, r := range tag {
+		if r < 0x20 || r == '`' {
+			return fmt.Errorf("invalid struct tag")
+		}
+	}
+	return nil
+}
 
-func structSpec(name string, f *schema.Field, o option.Options) ast.Spec {
+func structSpec(name string, f *schema.Field, o option.Options, cache *nameCache) ast.Spec {
 	fields := []*ast.Field{}
 	used := map[string]int{}
 	for _, k := range sortedKeys(f.Children) {
 		child := f.Children[k]
-		fieldName := uniqueName(exportedName(k), used)
+		fieldName := uniqueName(cache.get(k, exportedName), used)
 		typ := goType(child, fieldName, o)
 		tag := ""
 		if o.JsonTag {
@@ -67,7 +93,11 @@ func isIdentifier(s string) bool {
 	}
 	return true
 }
-func goType(f *schema.Field, nested string, o option.Options) ast.Expr {
+func goType(f *schema.Field, nested string, o option.Options, cache ...*nameCache) ast.Expr {
+	c := newNameCache()
+	if len(cache) > 0 && cache[0] != nil {
+		c = cache[0]
+	}
 	var e ast.Expr
 	switch f.Type {
 	case schema.TypeString:
@@ -83,12 +113,12 @@ func goType(f *schema.Field, nested string, o option.Options) ast.Expr {
 	case schema.TypeBoolean:
 		e = ast.NewIdent("bool")
 	case schema.TypeObject:
-		e = &ast.StructType{Fields: &ast.FieldList{List: objectFields(f, o)}}
+		e = &ast.StructType{Fields: &ast.FieldList{List: objectFields(f, o, c)}}
 	case schema.TypeArray:
 		if f.Element == nil {
 			e = ast.NewIdent("interface{}")
 		} else {
-			e = goType(f.Element, nested, o)
+			e = goType(f.Element, nested, o, cache...)
 		}
 	case schema.TypeNull:
 		// A JSON null has no concrete Go type. String is the safe default and
@@ -105,12 +135,12 @@ func goType(f *schema.Field, nested string, o option.Options) ast.Expr {
 	}
 	return e
 }
-func objectFields(f *schema.Field, o option.Options) []*ast.Field {
+func objectFields(f *schema.Field, o option.Options, cache *nameCache) []*ast.Field {
 	r := []*ast.Field{}
 	used := map[string]int{}
 	for _, k := range sortedKeys(f.Children) {
 		c := f.Children[k]
-		fieldName := uniqueName(exportedName(k), used)
+		fieldName := uniqueName(cache.get(k, exportedName), used)
 		tag := ""
 		if o.JsonTag {
 			tag = `json:"` + k
@@ -124,7 +154,7 @@ func objectFields(f *schema.Field, o option.Options) []*ast.Field {
 				tag = custom
 			}
 		}
-		r = append(r, &ast.Field{Names: []*ast.Ident{ast.NewIdent(fieldName)}, Type: goType(c, fieldName, o), Tag: tagLit(tag)})
+		r = append(r, &ast.Field{Names: []*ast.Ident{ast.NewIdent(fieldName)}, Type: goType(c, fieldName, o, cache), Tag: tagLit(tag)})
 	}
 	return r
 }

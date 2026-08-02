@@ -172,3 +172,28 @@ func ParseNDJSONParallelContext(ctx context.Context, r io.Reader, opts Options, 
 	}
 	return merged, nil
 }
+
+// ParseNDJSONParallelReadCloser is cancellation-safe for readers whose Close
+// method interrupts Read, such as network connections and files.
+func ParseNDJSONParallelReadCloser(ctx context.Context, r io.ReadCloser, opts Options, workers int) (*schema.Field, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is nil")
+	}
+	if r == nil {
+		return nil, fmt.Errorf("reader is nil")
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = r.Close()
+		case <-done:
+		}
+	}()
+	f, err := ParseNDJSONParallelContext(ctx, r, opts, workers)
+	close(done)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	return f, err
+}

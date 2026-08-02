@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/EmptyZeroRain/json2struct/generator"
@@ -18,23 +21,51 @@ import (
 type Options = option.Options
 type Field = schema.Field
 type Generator struct {
-	mu            sync.RWMutex
-	options       option.Options
-	schemas       []*schema.Field
-	merged        *schema.Field
-	version       uint64
-	mergedVersion uint64
+	mu             sync.RWMutex
+	options        option.Options
+	schemas        []*schema.Field
+	merged         *schema.Field
+	version        uint64
+	mergedVersion  uint64
+	totalBytes     int64
+	samples        int
+	nameCache      map[string]string
+	generatorCache *generator.NameCache
+	stats          Stats
 }
 
-func New(o Options) *Generator                 { o.Defaults(); return &Generator{options: o} }
+func New(o Options) *Generator {
+	o.Defaults()
+	return &Generator{options: o, generatorCache: generator.NewNameCache()}
+}
 func (g *Generator) AddJSON(data []byte) error { return g.AddReader(bytes.NewReader(data)) }
+func (g *Generator) Stats() Stats              { g.mu.RLock(); defer g.mu.RUnlock(); return g.stats }
 func (g *Generator) AddBatch(data [][]byte, workers int) error {
+	if g.options.Limits.MaxSamples > 0 {
+		g.mu.RLock()
+		current := g.samples
+		g.mu.RUnlock()
+		if current+len(data) > g.options.Limits.MaxSamples {
+			return fmt.Errorf("%w: %d", parser.ErrMaxSamples, g.options.Limits.MaxSamples)
+		}
+	}
+	if g.options.Limits.MaxTotalBytes > 0 {
+		var total int64
+		for _, d := range data {
+			total += int64(len(d))
+		}
+		g.mu.RLock()
+		current := g.totalBytes
+		g.mu.RUnlock()
+		if current+total > g.options.Limits.MaxTotalBytes {
+			return fmt.Errorf("%w: %d", parser.ErrMaxTotalBytes, g.options.Limits.MaxTotalBytes)
+		}
+	}
 	s, err := InferBatch(data, BatchOptions{Workers: workers})
 	if err != nil {
 		return err
 	}
-	g.addSchema(s)
-	return nil
+	return g.addSchema(s)
 }
 
 // AddBatchWithOptions is the configurable batch ingestion API.
@@ -43,21 +74,38 @@ func (g *Generator) AddBatchWithOptions(data [][]byte, opts BatchOptions) error 
 	if err != nil {
 		return err
 	}
-	g.addSchema(s)
-	return nil
+	return g.addSchema(s)
 }
 func (g *Generator) AddReader(r io.Reader) error {
-	s, err := (parser.JSONParser{}).Parse(r)
+	s, ps, err := parser.ParseWithStats(r, parser.Options{Limits: g.options.Limits})
 	if err != nil {
 		return err
 	}
-	g.addSchema(s)
-	return nil
+	err = g.addSchema(s)
+	if err == nil {
+		g.mu.Lock()
+		g.stats.Samples++
+		g.stats.Nodes += ps.Nodes
+		g.stats.Fields += ps.Fields
+		g.stats.Bytes += ps.Bytes
+		g.stats.Duration += ps.Duration
+		g.mu.Unlock()
+	}
+	return err
 }
 
-func (g *Generator) addSchema(s *schema.Field) {
+func (g *Generator) addSchema(s *schema.Field) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.options.Limits.MaxSamples > 0 && g.samples+1 > g.options.Limits.MaxSamples {
+		return fmt.Errorf("%w: %d", parser.ErrMaxSamples, g.options.Limits.MaxSamples)
+	}
+	if g.options.Limits.MaxTotalBytes > 0 && g.totalBytes >= g.options.Limits.MaxTotalBytes {
+		return fmt.Errorf("%w: %d", parser.ErrMaxTotalBytes, g.options.Limits.MaxTotalBytes)
+	}
+	if g.options.Limits.MaxSchemaNodes > 0 && schema.CountNodes(s) > g.options.Limits.MaxSchemaNodes {
+		return fmt.Errorf("%w: %d", parser.ErrMaxSchemaNodes, g.options.Limits.MaxSchemaNodes)
+	}
 	if g.options.Merge {
 		if g.merged == nil {
 			g.merged = s.Clone()
@@ -68,6 +116,10 @@ func (g *Generator) addSchema(s *schema.Field) {
 		g.schemas = append(g.schemas, s)
 	}
 	g.version++
+	g.samples++
+	// Byte accounting for stream inputs is updated by AddReader; byte-slice and
+	// batch APIs update it at their boundary before calling addSchema.
+	return nil
 }
 func (g *Generator) AddFile(name string) error {
 	f, err := os.Open(name)
@@ -77,33 +129,64 @@ func (g *Generator) AddFile(name string) error {
 	defer f.Close()
 	return g.AddReader(f)
 }
-func (g *Generator) AddNDJSON(r io.Reader) error {
-	s, err := parser.ParseNDJSON(r)
+func (g *Generator) AddFileUnder(root, name string) error {
+	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return err
 	}
-	g.addSchema(s)
-	return nil
+	pathAbs, err := filepath.Abs(filepath.Join(root, name))
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("path escapes root")
+	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return err
+	}
+	pathReal, err := filepath.EvalSymlinks(pathAbs)
+	if err != nil {
+		return err
+	}
+	realRel, err := filepath.Rel(rootReal, pathReal)
+	if err != nil || realRel == ".." || strings.HasPrefix(realRel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("path escapes root through symlink")
+	}
+	return g.AddFile(pathReal)
+}
+func (g *Generator) AddNDJSON(r io.Reader) error {
+	s, err := parser.ParseNDJSONWithOptions(r, parser.Options{Limits: g.options.Limits})
+	if err != nil {
+		return err
+	}
+	return g.addSchema(s)
 }
 func (g *Generator) AddNDJSONParallel(r io.Reader, opts parser.Options, workers int) error {
 	s, err := parser.ParseNDJSONParallel(r, opts, workers)
 	if err != nil {
 		return err
 	}
-	g.addSchema(s)
-	return nil
+	return g.addSchema(s)
 }
 func (g *Generator) AddNDJSONParallelContext(ctx context.Context, r io.Reader, opts parser.Options, workers int) error {
 	s, err := parser.ParseNDJSONParallelContext(ctx, r, opts, workers)
 	if err != nil {
 		return err
 	}
-	g.addSchema(s)
-	return nil
+	return g.addSchema(s)
+}
+func (g *Generator) AddNDJSONParallelReadCloser(ctx context.Context, r io.ReadCloser, opts parser.Options, workers int) error {
+	s, err := parser.ParseNDJSONParallelReadCloser(ctx, r, opts, workers)
+	if err != nil {
+		return err
+	}
+	return g.addSchema(s)
 }
 func (g *Generator) Schema() *Field { return g.mergedSchema() }
 func (g *Generator) Generate() ([]byte, error) {
-	return generator.Generate(g.mergedSchema(), g.options)
+	return generator.GenerateWithCache(g.mergedSchema(), g.options, g.generatorCache)
 }
 func (g *Generator) GenerateFromSchema(s *Field) ([]byte, error) {
 	return generator.Generate(s, g.options)

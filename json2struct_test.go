@@ -133,3 +133,19 @@ func TestAddBatchWithOptions(t *testing.T) {
 		t.Error("a should be optional")
 	}
 }
+
+func TestSchemaCycleIsRejected(t *testing.T) {
+	f := &json2struct.Field{Name: "root", Type: schema.TypeObject, Children: map[string]*json2struct.Field{}}
+	f.Children["self"] = f
+	g := json2struct.New(json2struct.Options{Name: "Cycle"})
+	if _, err := g.GenerateFromSchema(f); err == nil {
+		t.Fatal("expected cycle error")
+	}
+}
+
+func TestAddFileUnderRejectsTraversal(t *testing.T) {
+	g := json2struct.New(json2struct.Options{Name: "Safe"})
+	if err := g.AddFileUnder("/tmp", "../etc/passwd"); err == nil {
+		t.Fatal("expected path traversal rejection")
+	}
+}

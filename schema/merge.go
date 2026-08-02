@@ -14,9 +14,16 @@ func Merge(a, b *Field) *Field {
 
 // MergeInto merges b into a in place. The caller must exclusively own a.
 func MergeInto(a, b *Field) *Field {
+	return mergeIntoSeen(a, b, make(map[*Field]bool))
+}
+func mergeIntoSeen(a, b *Field, seen map[*Field]bool) *Field {
 	if a == nil {
 		return b.Clone()
 	}
+	if seen[a] {
+		return a
+	}
+	seen[a] = true
 	if b == nil {
 		return a
 	}
@@ -58,7 +65,7 @@ func MergeInto(a, b *Field) *Field {
 		}
 		for name, child := range b.Children {
 			if old, ok := a.Children[name]; ok {
-				MergeInto(old, child)
+				mergeIntoSeen(old, child, seen)
 			} else {
 				c := child.Clone()
 				c.Required = false
@@ -70,8 +77,9 @@ func MergeInto(a, b *Field) *Field {
 		if a.Element == nil && b.Element != nil {
 			a.Element = b.Element.Clone()
 		} else if a.Element != nil && b.Element != nil {
-			MergeInto(a.Element, b.Element)
+			mergeIntoSeen(a.Element, b.Element, seen)
 		}
 	}
+	delete(seen, a)
 	return a
 }
