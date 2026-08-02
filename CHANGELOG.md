@@ -4,6 +4,20 @@
 
 后续变更写在这里，发布时移动到对应版本。
 
+## [0.1.4] - 2026-08-02
+
+### Added
+
+- `MaxStringBytes` 和 `MaxNumberBytes` 输入限制。
+- `schema.MergeAll` 平衡树批量合并。
+- 并行 NDJSON 按输入序号确定性合并。
+
+### Fixed
+
+- 降低普通 JSON Reader 解析时的额外整包内存拷贝。
+- 修复并行 NDJSON Worker 在生产者或消费者异常时的清理流程。
+- 升级 CodeQL Action 并固定 gosec Action 版本。
+
 ## [0.1.3] - 2026-08-02
 
 ### Fixed

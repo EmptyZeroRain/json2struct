@@ -51,18 +51,12 @@ func InferBatch(data [][]byte, opts BatchOptions) (*Field, error) {
 	}
 	close(jobs)
 	wg.Wait()
-	var merged *schema.Field
-	for i, f := range results {
+	for i := range results {
 		if errs[i] != nil {
 			return nil, errs[i]
 		}
-		if merged == nil {
-			merged = f
-		} else {
-			schema.MergeInto(merged, f)
-		}
 	}
-	return merged, nil
+	return schema.MergeAll(results), nil
 }
 
 func bytesReader(b []byte) *byteReader { return &byteReader{b: b} }

@@ -11,9 +11,9 @@ import (
 	"github.com/EmptyZeroRain/json2struct/schema"
 )
 
-// ParseNDJSONParallel parses bounded batches concurrently and merges results
-// in input order. It uses a bounded queue, so a large stream is not retained
-// in memory by the parser.
+// ParseNDJSONParallel parses lines concurrently and merges them by sequence.
+// The input queue and result queue are bounded; the whole stream is never
+// retained in memory.
 func ParseNDJSONParallel(r io.Reader, opts Options, workers int) (*schema.Field, error) {
 	if r == nil {
 		return nil, fmt.Errorf("reader is nil")
@@ -29,69 +29,105 @@ func ParseNDJSONParallel(r io.Reader, opts Options, workers int) (*schema.Field,
 		max = 16 * 1024 * 1024
 	}
 	type job struct {
-		line int
+		seq  int
 		data []byte
 	}
 	type result struct {
-		line  int
+		seq   int
 		field *schema.Field
 		err   error
 	}
 	jobs := make(chan job, workers*2)
 	results := make(chan result, workers*2)
 	done := make(chan struct{})
-	var wg sync.WaitGroup
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { close(done) }) }
+	var workersWG sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		wg.Add(1)
+		workersWG.Add(1)
 		go func() {
-			defer wg.Done()
+			defer workersWG.Done()
 			for j := range jobs {
 				line := bytes.TrimSpace(j.data)
 				if len(line) == 0 {
+					select {
+					case results <- result{seq: j.seq}:
+					case <-done:
+						return
+					}
 					continue
 				}
 				f, err := ParseWithOptions(bytes.NewReader(line), opts)
 				select {
-				case results <- result{j.line, f, err}:
+				case results <- result{j.seq, f, err}:
 				case <-done:
 					return
 				}
 			}
 		}()
 	}
-	go func() { wg.Wait(); close(results) }()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), max+1)
-	line := 0
-	for scanner.Scan() {
-		line++
-		raw := append([]byte(nil), scanner.Bytes()...)
-		if len(raw) > max {
-			close(done)
-			close(jobs)
-			wg.Wait()
-			return nil, fmt.Errorf("ndjson line %d: %w", line, ErrMaxBytes)
+	go func() { workersWG.Wait(); close(results) }()
+	producerErr := make(chan error, 1)
+	go func() {
+		defer close(jobs)
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 64*1024), max+1)
+		seq := 0
+		for scanner.Scan() {
+			raw := append([]byte(nil), scanner.Bytes()...)
+			if len(raw) > max {
+				producerErr <- fmt.Errorf("ndjson line %d: %w", seq+1, ErrMaxBytes)
+				stop()
+				return
+			}
+			select {
+			case jobs <- job{seq, raw}:
+			case <-done:
+				return
+			}
+			seq++
 		}
-		jobs <- job{line, raw}
-	}
-	close(jobs)
-	if err := scanner.Err(); err != nil {
-		close(done)
-		wg.Wait()
-		return nil, err
-	}
+		producerErr <- scanner.Err()
+	}()
+
+	pending := make(map[int]result, workers*2)
+	next := 0
 	var merged *schema.Field
+	var firstErr error
 	for item := range results {
-		if item.err != nil {
-			return nil, fmt.Errorf("ndjson line %d: %w", item.line, item.err)
+		if firstErr != nil {
+			continue
 		}
-		if item.field != nil {
-			if merged == nil {
-				merged = item.field
-			} else {
-				schema.MergeInto(merged, item.field)
+		pending[item.seq] = item
+		for {
+			ready, ok := pending[next]
+			if !ok {
+				break
+			}
+			delete(pending, next)
+			next++
+			if ready.err != nil {
+				firstErr = fmt.Errorf("ndjson line %d: %w", ready.seq+1, ready.err)
+				stop()
+				break
+			}
+			if ready.field != nil {
+				if merged == nil {
+					merged = ready.field
+				} else {
+					schema.MergeInto(merged, ready.field)
+				}
 			}
 		}
+	}
+	if err := <-producerErr; err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if firstErr == nil && len(pending) != 0 {
+		firstErr = fmt.Errorf("parser: incomplete NDJSON results")
+	}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	if merged == nil {
 		return nil, fmt.Errorf("no JSON values")

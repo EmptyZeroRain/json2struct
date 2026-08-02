@@ -43,20 +43,12 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 	if r == nil {
 		return nil, fmt.Errorf("reader is nil")
 	}
-	var data []byte
-	var err error
+	counted := &countingReader{reader: r}
+	var source io.Reader = counted
 	if opts.Limits.MaxBytes > 0 {
-		data, err = io.ReadAll(io.LimitReader(r, opts.Limits.MaxBytes+1))
-	} else {
-		data, err = io.ReadAll(r)
+		source = io.LimitReader(counted, opts.Limits.MaxBytes+1)
 	}
-	if err != nil {
-		return nil, err
-	}
-	if opts.Limits.MaxBytes > 0 && int64(len(data)) > opts.Limits.MaxBytes {
-		return nil, fmt.Errorf("%w: %d", ErrMaxBytes, opts.Limits.MaxBytes)
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
+	dec := json.NewDecoder(source)
 	dec.UseNumber()
 	var value interface{}
 	if err := dec.Decode(&value); err != nil {
@@ -69,10 +61,24 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 		}
 		return nil, fmt.Errorf("invalid trailing JSON: %w", err)
 	}
+	if opts.Limits.MaxBytes > 0 && counted.n > opts.Limits.MaxBytes {
+		return nil, fmt.Errorf("%w: %d", ErrMaxBytes, opts.Limits.MaxBytes)
+	}
 	if err := validateValue(value, opts.Limits); err != nil {
 		return nil, err
 	}
 	return inference.Infer(value), nil
+}
+
+type countingReader struct {
+	reader io.Reader
+	n      int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.n += int64(n)
+	return n, err
 }
 
 // ParseBytes is an allocation-conscious convenience API for a single sample.
@@ -99,6 +105,14 @@ func validateValue(root interface{}, l option.Limits) error {
 			return fmt.Errorf("%w: %d", ErrMaxDepth, l.MaxDepth)
 		}
 		switch x := current.value.(type) {
+		case string:
+			if l.MaxStringBytes > 0 && len(x) > l.MaxStringBytes {
+				return fmt.Errorf("%w: %d", ErrMaxStringBytes, l.MaxStringBytes)
+			}
+		case json.Number:
+			if l.MaxNumberBytes > 0 && len(x) > l.MaxNumberBytes {
+				return fmt.Errorf("%w: %d", ErrMaxNumberBytes, l.MaxNumberBytes)
+			}
 		case map[string]interface{}:
 			fields += len(x)
 			if l.MaxFields > 0 && fields > l.MaxFields {
