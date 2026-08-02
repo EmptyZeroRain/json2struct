@@ -21,3 +21,25 @@ func MergeAll(items []*Field) *Field {
 	}
 	return current[0]
 }
+
+// CountNodes returns the number of nodes in a schema tree.
+func CountNodes(root *Field) int {
+	if root == nil {
+		return 0
+	}
+	n := 0
+	stack := []*Field{root}
+	for len(stack) > 0 {
+		i := len(stack) - 1
+		f := stack[i]
+		stack = stack[:i]
+		n++
+		for _, c := range f.Children {
+			stack = append(stack, c)
+		}
+		if f.Element != nil {
+			stack = append(stack, f.Element)
+		}
+	}
+	return n
+}

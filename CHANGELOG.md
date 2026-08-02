@@ -4,6 +4,21 @@
 
 后续变更写在这里，发布时移动到对应版本。
 
+## [0.1.5] - 2026-08-02
+
+### Added
+
+- Token 级 JSON Schema 推断，减少中间反序列化树。
+- Context 取消 API：`ParseWithContext`、`ParseNDJSONParallelContext`。
+- `MaxTotalBytes`、`MaxSamples`、`MaxSchemaNodes` 限制。
+- 数组采样：`SampleArrayItems`。
+
+### Changed
+
+- 批量 Schema 使用树形合并。
+- 资源限制在解析阶段执行。
+- 支持超时、主动取消和 Worker 快速退出。
+
 ## [0.1.4] - 2026-08-02
 
 ### Added

@@ -3,6 +3,7 @@ package json2struct
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -86,6 +87,14 @@ func (g *Generator) AddNDJSON(r io.Reader) error {
 }
 func (g *Generator) AddNDJSONParallel(r io.Reader, opts parser.Options, workers int) error {
 	s, err := parser.ParseNDJSONParallel(r, opts, workers)
+	if err != nil {
+		return err
+	}
+	g.addSchema(s)
+	return nil
+}
+func (g *Generator) AddNDJSONParallelContext(ctx context.Context, r io.Reader, opts parser.Options, workers int) error {
+	s, err := parser.ParseNDJSONParallelContext(ctx, r, opts, workers)
 	if err != nil {
 		return err
 	}

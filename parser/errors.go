@@ -10,4 +10,7 @@ var (
 	ErrMaxNodes       = errors.New("parser: maximum nodes exceeded")
 	ErrMaxStringBytes = errors.New("parser: maximum string bytes exceeded")
 	ErrMaxNumberBytes = errors.New("parser: maximum number bytes exceeded")
+	ErrMaxSchemaNodes = errors.New("parser: maximum schema nodes exceeded")
+	ErrMaxTotalBytes  = errors.New("parser: maximum total bytes exceeded")
+	ErrMaxSamples     = errors.New("parser: maximum samples exceeded")
 )

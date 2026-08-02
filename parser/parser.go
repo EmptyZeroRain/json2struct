@@ -3,11 +3,11 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 
-	"github.com/EmptyZeroRain/json2struct/inference"
 	"github.com/EmptyZeroRain/json2struct/option"
 	"github.com/EmptyZeroRain/json2struct/schema"
 )
@@ -19,23 +19,7 @@ type Parser interface {
 type JSONParser struct{}
 
 func (JSONParser) Parse(r io.Reader) (*schema.Field, error) {
-	if r == nil {
-		return nil, fmt.Errorf("reader is nil")
-	}
-	dec := json.NewDecoder(r)
-	dec.UseNumber()
-	var value interface{}
-	if err := dec.Decode(&value); err != nil {
-		return nil, err
-	}
-	var extra interface{}
-	if err := dec.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return nil, fmt.Errorf("multiple JSON values; use ParseNDJSON for line-delimited input")
-		}
-		return nil, fmt.Errorf("invalid trailing JSON: %w", err)
-	}
-	return inference.Infer(value), nil
+	return ParseWithOptions(r, Options{})
 }
 
 // ParseWithOptions parses JSON while enforcing resource limits.
@@ -50,12 +34,12 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 	}
 	dec := json.NewDecoder(source)
 	dec.UseNumber()
-	var value interface{}
-	if err := dec.Decode(&value); err != nil {
+	state := &parseState{}
+	f, err := inferDecoder(dec, "", opts.Limits, 0, state)
+	if err != nil {
 		return nil, err
 	}
-	var extra interface{}
-	if err := dec.Decode(&extra); err != io.EOF {
+	if _, err = dec.Token(); err != io.EOF {
 		if err == nil {
 			return nil, fmt.Errorf("multiple JSON values")
 		}
@@ -64,10 +48,149 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 	if opts.Limits.MaxBytes > 0 && counted.n > opts.Limits.MaxBytes {
 		return nil, fmt.Errorf("%w: %d", ErrMaxBytes, opts.Limits.MaxBytes)
 	}
-	if err := validateValue(value, opts.Limits); err != nil {
+	return f, nil
+}
+
+// ParseWithContext is ParseWithOptions with cancellation support.
+func ParseWithContext(ctx context.Context, r io.Reader, opts Options) (*schema.Field, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is nil")
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return inference.Infer(value), nil
+	return ParseWithOptions(&contextReader{ctx: ctx, r: r}, opts)
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+type parseState struct{ nodes, fields int }
+
+func inferDecoder(dec *json.Decoder, name string, l option.Limits, depth int, state *parseState) (*schema.Field, error) {
+	state.nodes++
+	if l.MaxNodes > 0 && state.nodes > l.MaxNodes {
+		return nil, fmt.Errorf("%w: %d", ErrMaxNodes, l.MaxNodes)
+	}
+	if l.MaxDepth > 0 && depth > l.MaxDepth {
+		return nil, fmt.Errorf("%w: %d", ErrMaxDepth, l.MaxDepth)
+	}
+	t, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	f := schema.NewField(name, schema.TypeUnknown)
+	switch v := t.(type) {
+	case nil:
+		f.Type, f.Nullable = schema.TypeNull, true
+	case string:
+		if l.MaxStringBytes > 0 && len(v) > l.MaxStringBytes {
+			return nil, fmt.Errorf("%w: %d", ErrMaxStringBytes, l.MaxStringBytes)
+		}
+		f.Type = schema.TypeString
+	case bool:
+		f.Type = schema.TypeBoolean
+	case json.Number:
+		if l.MaxNumberBytes > 0 && len(v) > l.MaxNumberBytes {
+			return nil, fmt.Errorf("%w: %d", ErrMaxNumberBytes, l.MaxNumberBytes)
+		}
+		f.Type = schema.TypeString
+	case json.Delim:
+		switch v {
+		case '{':
+			f.Type = schema.TypeObject
+			f.Children = map[string]*schema.Field{}
+			for dec.More() {
+				keyToken, e := dec.Token()
+				key, ok := keyToken.(string)
+				if e != nil {
+					return nil, e
+				}
+				if !ok {
+					return nil, fmt.Errorf("invalid object key")
+				}
+				state.fields++
+				if l.MaxFields > 0 && state.fields > l.MaxFields {
+					return nil, fmt.Errorf("%w: %d", ErrMaxFields, l.MaxFields)
+				}
+				child, e := inferDecoder(dec, key, l, depth+1, state)
+				if e != nil {
+					return nil, e
+				}
+				f.Children[key] = child
+			}
+			if _, e := dec.Token(); e != nil {
+				return nil, e
+			}
+		case '[':
+			f.Type, f.Array = schema.TypeArray, true
+			var element *schema.Field
+			n := 0
+			for dec.More() {
+				n++
+				if l.MaxArrayItems > 0 && n > l.MaxArrayItems {
+					return nil, fmt.Errorf("%w: %d", ErrMaxArrayItems, l.MaxArrayItems)
+				}
+				if l.SampleArrayItems > 0 && n > l.SampleArrayItems {
+					if _, e := skipValue(dec); e != nil {
+						return nil, e
+					}
+					continue
+				}
+				child, e := inferDecoder(dec, "", l, depth+1, state)
+				if e != nil {
+					return nil, e
+				}
+				if element == nil {
+					element = child
+				} else {
+					schema.MergeInto(element, child)
+				}
+			}
+			if _, e := dec.Token(); e != nil {
+				return nil, e
+			}
+			f.Element = element
+		default:
+			return nil, fmt.Errorf("invalid JSON delimiter %q", v)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported JSON token")
+	}
+	return f, nil
+}
+
+func skipValue(dec *json.Decoder) (int, error) {
+	t, e := dec.Token()
+	if e != nil {
+		return 0, e
+	}
+	if d, ok := t.(json.Delim); ok && (d == '{' || d == '[') {
+		close := json.Delim('}')
+		if d == '[' {
+			close = ']'
+		}
+		for dec.More() {
+			if _, e = skipValue(dec); e != nil {
+				return 0, e
+			}
+		}
+		_, e = dec.Token()
+		if e != nil {
+			return 0, e
+		}
+		_ = close
+	}
+	return 0, nil
 }
 
 type countingReader struct {
@@ -83,9 +206,11 @@ func (r *countingReader) Read(p []byte) (int, error) {
 
 // ParseBytes is an allocation-conscious convenience API for a single sample.
 func ParseBytes(data []byte) (*schema.Field, error) {
-	return (JSONParser{}).Parse(bytes.NewReader(data))
+	return ParseWithOptions(bytes.NewReader(data), Options{})
 }
 
+// validateValue is kept for compatibility with internal tests and callers of
+// the old helper; production parsing uses inferDecoder directly.
 func validateValue(root interface{}, l option.Limits) error {
 	type item struct {
 		value interface{}
@@ -178,8 +303,13 @@ func ParseNDJSONWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 	s.Buffer(make([]byte, 64*1024), max+1)
 	var result *schema.Field
 	line := 0
+	var totalBytes int64
 	for s.Scan() {
 		line++
+		totalBytes += int64(len(s.Bytes()))
+		if opts.Limits.MaxTotalBytes > 0 && totalBytes > opts.Limits.MaxTotalBytes {
+			return nil, fmt.Errorf("%w: %d", ErrMaxTotalBytes, opts.Limits.MaxTotalBytes)
+		}
 		lineBytes := bytes.TrimSpace(s.Bytes())
 		if opts.Limits.MaxLineBytes > 0 && len(s.Bytes()) > opts.Limits.MaxLineBytes {
 			return nil, fmt.Errorf("ndjson line %d: maximum line size %d exceeded", line, opts.Limits.MaxLineBytes)
@@ -200,6 +330,9 @@ func ParseNDJSONWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 			result = f
 		} else {
 			schema.MergeInto(result, f)
+		}
+		if opts.Limits.MaxSchemaNodes > 0 && schema.CountNodes(result) > opts.Limits.MaxSchemaNodes {
+			return nil, fmt.Errorf("%w: %d", ErrMaxSchemaNodes, opts.Limits.MaxSchemaNodes)
 		}
 	}
 	if err := s.Err(); err != nil {

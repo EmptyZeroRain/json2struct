@@ -2,6 +2,7 @@ package json2struct
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"sync"
@@ -23,6 +24,18 @@ type BatchOptions struct {
 func InferBatch(data [][]byte, opts BatchOptions) (*Field, error) {
 	if len(data) == 0 {
 		return nil, ErrNoSchema
+	}
+	if opts.Parser.Limits.MaxSamples > 0 && len(data) > opts.Parser.Limits.MaxSamples {
+		return nil, fmt.Errorf("%w: %d", parser.ErrMaxSamples, opts.Parser.Limits.MaxSamples)
+	}
+	if opts.Parser.Limits.MaxTotalBytes > 0 {
+		var total int64
+		for _, sample := range data {
+			total += int64(len(sample))
+			if total > opts.Parser.Limits.MaxTotalBytes {
+				return nil, fmt.Errorf("%w: %d", parser.ErrMaxTotalBytes, opts.Parser.Limits.MaxTotalBytes)
+			}
+		}
 	}
 	if opts.Workers == 0 {
 		opts.Workers = runtime.GOMAXPROCS(0)
@@ -56,7 +69,11 @@ func InferBatch(data [][]byte, opts BatchOptions) (*Field, error) {
 			return nil, errs[i]
 		}
 	}
-	return schema.MergeAll(results), nil
+	merged := schema.MergeAll(results)
+	if opts.Parser.Limits.MaxSchemaNodes > 0 && schema.CountNodes(merged) > opts.Parser.Limits.MaxSchemaNodes {
+		return nil, fmt.Errorf("%w: %d", parser.ErrMaxSchemaNodes, opts.Parser.Limits.MaxSchemaNodes)
+	}
+	return merged, nil
 }
 
 func bytesReader(b []byte) *byteReader { return &byteReader{b: b} }

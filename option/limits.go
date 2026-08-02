@@ -3,12 +3,16 @@ package option
 // Limits prevents hostile or unexpectedly large input from exhausting memory.
 // A zero value means unlimited.
 type Limits struct {
-	MaxBytes       int64
-	MaxDepth       int
-	MaxFields      int
-	MaxArrayItems  int
-	MaxLineBytes   int
-	MaxNodes       int
-	MaxStringBytes int
-	MaxNumberBytes int
+	MaxBytes         int64
+	MaxDepth         int
+	MaxFields        int
+	MaxArrayItems    int
+	MaxLineBytes     int
+	MaxNodes         int
+	MaxStringBytes   int
+	MaxNumberBytes   int
+	SampleArrayItems int
+	MaxTotalBytes    int64
+	MaxSamples       int
+	MaxSchemaNodes   int
 }

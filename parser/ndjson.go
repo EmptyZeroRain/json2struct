@@ -3,6 +3,7 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"runtime"
@@ -15,6 +16,17 @@ import (
 // The input queue and result queue are bounded; the whole stream is never
 // retained in memory.
 func ParseNDJSONParallel(r io.Reader, opts Options, workers int) (*schema.Field, error) {
+	return ParseNDJSONParallelContext(context.Background(), r, opts, workers)
+}
+
+// ParseNDJSONParallelContext supports cancellation while reading and parsing.
+func ParseNDJSONParallelContext(ctx context.Context, r io.Reader, opts Options, workers int) (*schema.Field, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if r == nil {
 		return nil, fmt.Errorf("reader is nil")
 	}
@@ -57,10 +69,12 @@ func ParseNDJSONParallel(r io.Reader, opts Options, workers int) (*schema.Field,
 					}
 					continue
 				}
-				f, err := ParseWithOptions(bytes.NewReader(line), opts)
+				f, err := ParseWithContext(ctx, bytes.NewReader(line), opts)
 				select {
 				case results <- result{j.seq, f, err}:
 				case <-done:
+					return
+				case <-ctx.Done():
 					return
 				}
 			}
@@ -73,19 +87,40 @@ func ParseNDJSONParallel(r io.Reader, opts Options, workers int) (*schema.Field,
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, 64*1024), max+1)
 		seq := 0
+		var totalBytes int64
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				producerErr <- err
+				stop()
+				return
+			}
 			raw := append([]byte(nil), scanner.Bytes()...)
+			seq++
+			if opts.Limits.MaxSamples > 0 && seq > opts.Limits.MaxSamples {
+				producerErr <- fmt.Errorf("%w: %d", ErrMaxSamples, opts.Limits.MaxSamples)
+				stop()
+				return
+			}
+			totalBytes += int64(len(raw))
+			if opts.Limits.MaxTotalBytes > 0 && totalBytes > opts.Limits.MaxTotalBytes {
+				producerErr <- fmt.Errorf("%w: %d", ErrMaxTotalBytes, opts.Limits.MaxTotalBytes)
+				stop()
+				return
+			}
 			if len(raw) > max {
-				producerErr <- fmt.Errorf("ndjson line %d: %w", seq+1, ErrMaxBytes)
+				producerErr <- fmt.Errorf("ndjson line %d: %w", seq, ErrMaxBytes)
 				stop()
 				return
 			}
 			select {
-			case jobs <- job{seq, raw}:
+			case jobs <- job{seq - 1, raw}:
 			case <-done:
 				return
+			case <-ctx.Done():
+				producerErr <- ctx.Err()
+				stop()
+				return
 			}
-			seq++
 		}
 		producerErr <- scanner.Err()
 	}()
@@ -125,6 +160,9 @@ func ParseNDJSONParallel(r io.Reader, opts Options, workers int) (*schema.Field,
 	}
 	if firstErr == nil && len(pending) != 0 {
 		firstErr = fmt.Errorf("parser: incomplete NDJSON results")
+	}
+	if firstErr == nil {
+		firstErr = ctx.Err()
 	}
 	if firstErr != nil {
 		return nil, firstErr
