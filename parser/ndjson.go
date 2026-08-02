@@ -76,6 +76,8 @@ func ParseNDJSONParallel(r io.Reader, opts Options, workers int) (*schema.Field,
 	}
 	close(jobs)
 	if err := scanner.Err(); err != nil {
+		close(done)
+		wg.Wait()
 		return nil, err
 	}
 	var merged *schema.Field

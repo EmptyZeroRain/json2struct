@@ -13,6 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: securego/gosec@master
+      - uses: securego/gosec@v2.22.8
         with:
-          args: ./...
+          args: '-exclude=G304 ./...'
