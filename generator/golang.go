@@ -3,8 +3,6 @@ package generator
 import (
 	"bytes"
 	"fmt"
-	"github.com/EmptyZeroRain/json2struct/option"
-	"github.com/EmptyZeroRain/json2struct/schema"
 	"go/ast"
 	"go/format"
 	"go/token"
@@ -12,6 +10,9 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/EmptyZeroRain/json2struct/option"
+	"github.com/EmptyZeroRain/json2struct/schema"
 )
 
 func Generate(s *schema.Field, opts option.Options) ([]byte, error) {

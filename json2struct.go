@@ -4,13 +4,14 @@ package json2struct
 import (
 	"bytes"
 	"errors"
+	"io"
+	"os"
+	"sync"
+
 	"github.com/EmptyZeroRain/json2struct/generator"
 	"github.com/EmptyZeroRain/json2struct/option"
 	"github.com/EmptyZeroRain/json2struct/parser"
 	"github.com/EmptyZeroRain/json2struct/schema"
-	"io"
-	"os"
-	"sync"
 )
 
 type Options = option.Options
@@ -31,17 +32,7 @@ func (g *Generator) AddBatch(data [][]byte, workers int) error {
 	if err != nil {
 		return err
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.schemas = append(g.schemas, s)
-	if g.options.Merge {
-		if g.merged == nil {
-			g.merged = s.Clone()
-		} else {
-			schema.MergeInto(g.merged, s)
-		}
-	}
-	g.version++
+	g.addSchema(s)
 	return nil
 }
 
@@ -51,17 +42,7 @@ func (g *Generator) AddBatchWithOptions(data [][]byte, opts BatchOptions) error 
 	if err != nil {
 		return err
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.schemas = append(g.schemas, s)
-	if g.options.Merge {
-		if g.merged == nil {
-			g.merged = s.Clone()
-		} else {
-			schema.MergeInto(g.merged, s)
-		}
-	}
-	g.version++
+	g.addSchema(s)
 	return nil
 }
 func (g *Generator) AddReader(r io.Reader) error {
@@ -69,18 +50,23 @@ func (g *Generator) AddReader(r io.Reader) error {
 	if err != nil {
 		return err
 	}
+	g.addSchema(s)
+	return nil
+}
+
+func (g *Generator) addSchema(s *schema.Field) {
 	g.mu.Lock()
-	g.schemas = append(g.schemas, s)
+	defer g.mu.Unlock()
 	if g.options.Merge {
 		if g.merged == nil {
 			g.merged = s.Clone()
 		} else {
 			schema.MergeInto(g.merged, s)
 		}
+	} else {
+		g.schemas = append(g.schemas, s)
 	}
 	g.version++
-	g.mu.Unlock()
-	return nil
 }
 func (g *Generator) AddFile(name string) error {
 	f, err := os.Open(name)
@@ -95,17 +81,15 @@ func (g *Generator) AddNDJSON(r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	g.mu.Lock()
-	g.schemas = append(g.schemas, s)
-	if g.options.Merge {
-		if g.merged == nil {
-			g.merged = s.Clone()
-		} else {
-			schema.MergeInto(g.merged, s)
-		}
+	g.addSchema(s)
+	return nil
+}
+func (g *Generator) AddNDJSONParallel(r io.Reader, opts parser.Options, workers int) error {
+	s, err := parser.ParseNDJSONParallel(r, opts, workers)
+	if err != nil {
+		return err
 	}
-	g.version++
-	g.mu.Unlock()
+	g.addSchema(s)
 	return nil
 }
 func (g *Generator) Schema() *Field { return g.mergedSchema() }
@@ -136,6 +120,11 @@ func (g *Generator) GenerateAll() ([][]byte, error) {
 
 func (g *Generator) mergedSchema() *schema.Field {
 	g.mu.RLock()
+	if g.options.Merge && g.merged != nil {
+		r := g.merged.Clone()
+		g.mu.RUnlock()
+		return r
+	}
 	if g.merged != nil && g.mergedVersion == g.version {
 		r := g.merged.Clone()
 		g.mu.RUnlock()

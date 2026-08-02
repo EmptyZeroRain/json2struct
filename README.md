@@ -77,6 +77,16 @@ if err := g.AddReader(file); err != nil {
 
 `AddReader` 支持任意 JSON Reader，`AddFile` 支持文件，`AddNDJSON` 按行流式读取并合并。`Schema()` 返回可修改的公开 schema，修改后使用 `GenerateFromSchema` 生成代码。运行 `go test ./...` 验证库。
 
+大文件 NDJSON 可使用有界并行解析：
+
+```go
+if err := g.AddNDJSONParallel(reader, parser.Options{
+    Limits: option.Limits{MaxLineBytes: 16 * 1024 * 1024, MaxNodes: 100000},
+}, 8); err != nil {
+    log.Fatal(err)
+}
+```
+
 大批量样本可以并行推断后合并：
 
 ```go

@@ -2,6 +2,7 @@ package inference
 
 import (
 	"encoding/json"
+
 	"github.com/EmptyZeroRain/json2struct/schema"
 )
 

@@ -54,7 +54,7 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 		return nil, err
 	}
 	if opts.Limits.MaxBytes > 0 && int64(len(data)) > opts.Limits.MaxBytes {
-		return nil, fmt.Errorf("parser: maximum input size %d exceeded", opts.Limits.MaxBytes)
+		return nil, fmt.Errorf("%w: %d", ErrMaxBytes, opts.Limits.MaxBytes)
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -69,8 +69,7 @@ func ParseWithOptions(r io.Reader, opts Options) (*schema.Field, error) {
 		}
 		return nil, fmt.Errorf("invalid trailing JSON: %w", err)
 	}
-	count := 0
-	if err := validateValue(value, opts.Limits, 0, "$", &count); err != nil {
+	if err := validateValue(value, opts.Limits); err != nil {
 		return nil, err
 	}
 	return inference.Infer(value), nil
@@ -81,28 +80,39 @@ func ParseBytes(data []byte) (*schema.Field, error) {
 	return (JSONParser{}).Parse(bytes.NewReader(data))
 }
 
-func validateValue(v interface{}, l option.Limits, depth int, path string, count *int) error {
-	if l.MaxDepth > 0 && depth > l.MaxDepth {
-		return fmt.Errorf("parser: maximum depth %d exceeded at %s", l.MaxDepth, path)
+func validateValue(root interface{}, l option.Limits) error {
+	type item struct {
+		value interface{}
+		depth int
 	}
-	switch x := v.(type) {
-	case map[string]interface{}:
-		for k, child := range x {
-			*count = *count + 1
-			if l.MaxFields > 0 && *count > l.MaxFields {
-				return fmt.Errorf("parser: maximum fields %d exceeded at %s", l.MaxFields, path)
-			}
-			if err := validateValue(child, l, depth+1, path+"."+k, count); err != nil {
-				return err
-			}
+	stack := []item{{root, 0}}
+	fields, nodes := 0, 0
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		current := stack[last]
+		stack = stack[:last]
+		nodes++
+		if l.MaxNodes > 0 && nodes > l.MaxNodes {
+			return fmt.Errorf("%w: %d", ErrMaxNodes, l.MaxNodes)
 		}
-	case []interface{}:
-		if l.MaxArrayItems > 0 && len(x) > l.MaxArrayItems {
-			return fmt.Errorf("parser: maximum array items %d exceeded at %s", l.MaxArrayItems, path)
+		if l.MaxDepth > 0 && current.depth > l.MaxDepth {
+			return fmt.Errorf("%w: %d", ErrMaxDepth, l.MaxDepth)
 		}
-		for i, child := range x {
-			if err := validateValue(child, l, depth+1, fmt.Sprintf("%s[%d]", path, i), count); err != nil {
-				return err
+		switch x := current.value.(type) {
+		case map[string]interface{}:
+			fields += len(x)
+			if l.MaxFields > 0 && fields > l.MaxFields {
+				return fmt.Errorf("%w: %d", ErrMaxFields, l.MaxFields)
+			}
+			for _, child := range x {
+				stack = append(stack, item{child, current.depth + 1})
+			}
+		case []interface{}:
+			if l.MaxArrayItems > 0 && len(x) > l.MaxArrayItems {
+				return fmt.Errorf("%w: %d", ErrMaxArrayItems, l.MaxArrayItems)
+			}
+			for _, child := range x {
+				stack = append(stack, item{child, current.depth + 1})
 			}
 		}
 	}

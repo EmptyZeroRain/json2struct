@@ -9,3 +9,5 @@
 5. PR 描述中说明变更内容、兼容性影响和验证命令。
 
 请不要提交密钥、真实业务数据或 IDE 配置文件。
+
+发布流程见 [RELEASE.md](RELEASE.md)。每次创建 tag 前必须先更新 `CHANGELOG.md`，tag 名称、GitHub Release 名称和模块版本必须保持一致。

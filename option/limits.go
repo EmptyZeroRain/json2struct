@@ -8,4 +8,5 @@ type Limits struct {
 	MaxFields     int
 	MaxArrayItems int
 	MaxLineBytes  int
+	MaxNodes      int
 }
